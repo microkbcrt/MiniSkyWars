@@ -3,7 +3,6 @@ package me.example.miniskywars;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.GameMode;
-import org.bukkit.GameRule;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
@@ -142,7 +141,7 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
                 if (args.length == 2 && args[1].equalsIgnoreCase("survival")) {
                     saveLocation("survivalSpawn", player.getLocation());
                     World world = player.getWorld();
-                    trySetGameRule(world, GameRule.KEEP_INVENTORY, true);
+                    trySetAnyGameRule(world, true, "keepInventory");
                     saveConfig();
                     sender.sendMessage(color("&a已设置生存主世界返回点。"));
                     return true;
@@ -394,9 +393,9 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
             return;
         }
         world.setSpawnLocation(0, 101, 0);
-        trySetGameRule(world, GameRule.SPAWN_MOBS, false);
-        trySetGameRule(world, GameRule.ADVANCE_TIME, false);
-        trySetGameRule(world, GameRule.KEEP_INVENTORY, true);
+        trySetAnyGameRule(world, false, "spawnMobs", "doMobSpawning");
+        trySetAnyGameRule(world, false, "advanceTime", "doDaylightCycle");
+        trySetAnyGameRule(world, true, "keepInventory");
         world.setTime(6000L);
 
         for (int x = -2; x <= 2; x++) {
@@ -536,7 +535,7 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
         clearGameInventory(player);
         preparePlayerVitals(player);
         player.setGameMode(GameMode.ADVENTURE);
-        trySetGameRule(playWorld, GameRule.KEEP_INVENTORY, true);
+        trySetAnyGameRule(playWorld, true, "keepInventory");
 
         // 玩家脚下玻璃。开局时会移除该方块。
         Block footBlock = spawn.clone().subtract(0, 1, 0).getBlock();
@@ -651,7 +650,7 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
         arena.state = GameState.RUNNING;
         World world = Bukkit.getWorld(playWorldName(arena.mapName));
         if (world != null) {
-            trySetGameRule(world, GameRule.KEEP_INVENTORY, false);
+            trySetAnyGameRule(world, false, "keepInventory");
         }
 
         for (UUID uuid : new HashSet<>(arena.players)) {
@@ -752,7 +751,7 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
 
         World newPlay = loadMapWorld(play);
         if (newPlay != null) {
-            trySetGameRule(newPlay, GameRule.KEEP_INVENTORY, true);
+            trySetAnyGameRule(newPlay, true, "keepInventory");
             fillChests(mapName, newPlay);
             newPlay.save();
         }
@@ -1061,7 +1060,7 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
             spawn = defaultWorld.getSpawnLocation().add(0.5, 0, 0.5);
         }
         if (spawn.getWorld() != null) {
-            trySetGameRule(spawn.getWorld(), GameRule.KEEP_INVENTORY, true);
+            trySetAnyGameRule(spawn.getWorld(), true, "keepInventory");
         }
         player.teleport(spawn);
     }
@@ -1249,13 +1248,34 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
         saveConfig();
     }
 
-    private <T> void trySetGameRule(World world, GameRule<T> rule, T value) {
-        if (world == null) {
+    /**
+     * 26.2 的 Bukkit/Paper 正在把部分 GameRule 常量改名；直接引用 GameRule.SPAWN_MOBS
+     * 可能出现“编译能过、运行时 NoSuchFieldError”的情况。这里改用字符串 gamerule，
+     * 并按新旧名称依次尝试，兼容 Spigot/Paper 26.2 以及过渡构建。
+     */
+    private void trySetAnyGameRule(World world, boolean value, String... candidateRules) {
+        if (world == null || candidateRules == null) {
             return;
         }
+        for (String rule : candidateRules) {
+            if (trySetGameRuleValue(world, rule, Boolean.toString(value))) {
+                return;
+            }
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private boolean trySetGameRuleValue(World world, String rule, String value) {
+        if (world == null || rule == null || rule.isBlank()) {
+            return false;
+        }
         try {
-            world.setGameRule(rule, value);
-        } catch (Exception ignored) {
+            if (!world.isGameRule(rule)) {
+                return false;
+            }
+            return world.setGameRuleValue(rule, value);
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
@@ -1427,6 +1447,11 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
      * 空的 ChunkGenerator：新建地图时用作虚空世界；复制已有地图时，不影响已生成区块，只避免外部继续生成普通地形。
      */
     public static final class VoidWorldGenerator extends ChunkGenerator {
+        @Override
+        public Location getFixedSpawnLocation(World world, Random random) {
+            return new Location(world, 0.5, 101.0, 0.5);
+        }
+
         @Override
         public ChunkData generateChunkData(World world, Random random, int chunkX, int chunkZ, BiomeGrid biome) {
             return createChunkData(world);
