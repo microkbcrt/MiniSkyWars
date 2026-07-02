@@ -1,0 +1,20 @@
+name: MiniSkyWars
+version: 1.0.0
+main: me.example.miniskywars.MiniSkyWars
+api-version: '26.2'
+author: ChatGPT
+commands:
+  sw:
+    description: Mini SkyWars player/admin command
+    usage: /sw <join|quit|set|add|delete>
+  swmap:
+    description: Mini SkyWars map command
+    usage: /swmap <create|save|register|unregister|edit|quit>
+  swforce:
+    description: Mini SkyWars force command
+    usage: /swforce <start|stop> [map]
+permissions:
+  miniskywars.use:
+    default: true
+  miniskywars.admin:
+    default: op
