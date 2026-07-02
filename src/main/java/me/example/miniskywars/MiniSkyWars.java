@@ -17,11 +17,13 @@ import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.CreatureSpawnEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.generator.ChunkGenerator;
+import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
@@ -72,6 +74,7 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
     private final Set<String> restoringMaps = new HashSet<>();
     private final Set<UUID> pendingReconnectKills = new HashSet<>();
     private final Set<UUID> noDropForcedKills = new HashSet<>();
+    private BukkitTask worldRuleTask;
 
     @Override
     public void onEnable() {
@@ -94,11 +97,24 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
         Objects.requireNonNull(getCommand("swmap")).setTabCompleter(this);
         Objects.requireNonNull(getCommand("swforce")).setTabCompleter(this);
         Bukkit.getPluginManager().registerEvents(this, this);
+
+        worldRuleTask = new BukkitRunnable() {
+            @Override
+            public void run() {
+                enforceAllSkyWarsWorlds();
+            }
+        }.runTaskTimer(this, 0L, 100L);
     }
 
     @Override
     public void onDisable() {
         savePendingReconnectKills();
+
+        if (worldRuleTask != null) {
+            worldRuleTask.cancel();
+            worldRuleTask = null;
+        }
+
         for (Arena arena : arenas.values()) {
             if (arena.countdownTask != null) {
                 arena.countdownTask.cancel();
@@ -142,7 +158,7 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
                 if (args.length == 2 && args[1].equalsIgnoreCase("survival")) {
                     saveLocation("survivalSpawn", player.getLocation());
                     World world = player.getWorld();
-                    trySetAnyGameRule(world, true, "keepInventory");
+                    trySetAnyGameRule(world, true, "keep_inventory", "minecraft:keep_inventory", "keepInventory");
                     saveConfig();
                     sender.sendMessage(color("&a已设置生存主世界返回点。"));
                     return true;
@@ -216,10 +232,10 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
                 return true;
             }
             String path = "maps." + mapName + ".chests." + chestName;
-            saveLocation(path + ".location", player.getLocation());
-            getConfig().set(path + ".rarity", rarity);
             Block block = player.getLocation().getBlock();
             block.setType(Material.CHEST, false);
+            saveLocation(path + ".location", block.getLocation());
+            getConfig().set(path + ".rarity", rarity);
             saveConfig();
             player.sendMessage(color("&a已添加宝箱刷新点 &f" + chestName + " &a稀有度 &f" + rarity + "&a。"));
             return true;
@@ -394,9 +410,8 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
             return;
         }
         world.setSpawnLocation(0, 101, 0);
-        trySetAnyGameRule(world, false, "spawnMobs", "doMobSpawning");
-        trySetAnyGameRule(world, false, "advanceTime", "doDaylightCycle");
-        trySetAnyGameRule(world, true, "keepInventory");
+        applySkyWarsEnvironmentRules(world);
+        trySetAnyGameRule(world, true, "keep_inventory", "minecraft:keep_inventory", "keepInventory");
         world.setTime(6000L);
 
         for (int x = -2; x <= 2; x++) {
@@ -536,7 +551,7 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
         clearGameInventory(player);
         preparePlayerVitals(player);
         player.setGameMode(GameMode.ADVENTURE);
-        trySetAnyGameRule(playWorld, true, "keepInventory");
+        trySetAnyGameRule(playWorld, true, "keep_inventory", "minecraft:keep_inventory", "keepInventory");
 
         // 玩家脚下玻璃。开局时会移除该方块。
         Block footBlock = spawn.clone().subtract(0, 1, 0).getBlock();
@@ -562,7 +577,15 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
         if (findExistingWorldFolder(play) == null) {
             resetPlayWorld(mapName);
         }
-        return loadMapWorld(play);
+
+        World playWorld = loadMapWorld(play);
+        if (playWorld != null) {
+            applySkyWarsEnvironmentRules(playWorld);
+            fillChests(mapName, playWorld);
+            playWorld.save();
+        }
+
+        return playWorld;
     }
 
     private void playerQuitCommand(Player player) throws IOException {
@@ -651,7 +674,8 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
         arena.state = GameState.RUNNING;
         World world = Bukkit.getWorld(playWorldName(arena.mapName));
         if (world != null) {
-            trySetAnyGameRule(world, false, "keepInventory");
+            applySkyWarsEnvironmentRules(world);
+            trySetAnyGameRule(world, false, "keep_inventory", "minecraft:keep_inventory", "keepInventory");
         }
 
         for (UUID uuid : new HashSet<>(arena.players)) {
@@ -760,44 +784,72 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
     
         deleteDirectory(target);
         copyWorldFolder(source, target);
-    
+        deletePaperWorldMetadata(target);
+
         World newPlay = loadMapWorld(play);
         if (newPlay != null) {
-            trySetAnyGameRule(newPlay, true, "keepInventory");
+            applySkyWarsEnvironmentRules(newPlay);
+            trySetAnyGameRule(newPlay, true, "keep_inventory", "minecraft:keep_inventory", "keepInventory");
             fillChests(mapName, newPlay);
             newPlay.save();
         }
-    
+
         restoringMaps.remove(mapName);
     }
     private void fillChests(String mapName, World playWorld) {
         ConfigurationSection chests = getConfig().getConfigurationSection("maps." + mapName + ".chests");
         if (chests == null) {
+            getLogger().warning("地图 " + mapName + " 没有配置任何宝箱点。");
             return;
         }
+
+        int filled = 0;
+
         for (String chestName : chests.getKeys(false)) {
             int rarity = getConfig().getInt("maps." + mapName + ".chests." + chestName + ".rarity", 1);
             Location loc = loadLocationInWorld("maps." + mapName + ".chests." + chestName + ".location", playWorld.getName());
+
             if (loc == null) {
+                getLogger().warning("宝箱点位置损坏: " + mapName + " / " + chestName);
                 continue;
             }
+
+            loc.getChunk().load(true);
+
             Block block = loc.getBlock();
             block.setType(Material.CHEST, false);
-            if (block.getState() instanceof Chest chest) {
-                chest.getBlockInventory().clear();
-                List<ItemStack> loot = rollLoot(rarity);
-                for (ItemStack item : loot) {
-                    int slot;
-                    int guard = 0;
-                    do {
-                        slot = random.nextInt(chest.getBlockInventory().getSize());
-                        guard++;
-                    } while (chest.getBlockInventory().getItem(slot) != null && guard < 100);
-                    chest.getBlockInventory().setItem(slot, item);
-                }
-                chest.update(true, false);
+
+            if (!(block.getState() instanceof Chest chest)) {
+                getLogger().warning("宝箱点不是 Chest 方块: " + mapName + " / " + chestName + " @ " + loc);
+                continue;
             }
+
+            Inventory inv = chest.getBlockInventory();
+            inv.clear();
+
+            List<ItemStack> loot = rollLoot(rarity);
+            if (loot.isEmpty()) {
+                getLogger().warning("宝箱战利品为空: " + mapName + " / " + chestName + " rarity=" + rarity);
+                continue;
+            }
+
+            for (ItemStack item : loot) {
+                int slot;
+                int guard = 0;
+
+                do {
+                    slot = random.nextInt(inv.getSize());
+                    guard++;
+                } while (inv.getItem(slot) != null && guard < 100);
+
+                inv.setItem(slot, item);
+            }
+
+            chest.update(true, false);
+            filled++;
         }
+
+        getLogger().info("已刷新地图 " + mapName + " 的宝箱数量: " + filled);
     }
 
     private List<ItemStack> rollLoot(int rarity) {
@@ -868,6 +920,16 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
     private void add(List<ItemStack> pool, Material material, int min, int max) {
         int amount = min + random.nextInt(Math.max(1, max - min + 1));
         pool.add(new ItemStack(material, amount));
+    }
+
+    @EventHandler
+    public void onCreatureSpawn(CreatureSpawnEvent event) {
+        World world = event.getLocation().getWorld();
+        if (!isManagedSkyWarsWorld(world)) {
+            return;
+        }
+
+        event.setCancelled(true);
     }
 
     @EventHandler
@@ -1072,7 +1134,7 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
             spawn = defaultWorld.getSpawnLocation().add(0.5, 0, 0.5);
         }
         if (spawn.getWorld() != null) {
-            trySetAnyGameRule(spawn.getWorld(), true, "keepInventory");
+            trySetAnyGameRule(spawn.getWorld(), true, "keep_inventory", "minecraft:keep_inventory", "keepInventory");
         }
         player.teleport(spawn);
     }
@@ -1335,21 +1397,105 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
 
             @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                String fileName = file.getFileName().toString();
-                if (fileName.equalsIgnoreCase("uid.dat") || fileName.equalsIgnoreCase("session.lock")) {
+                if (shouldSkipWorldCloneFile(source, file)) {
+                    getLogger().info("跳过世界克隆元数据文件: " + source.relativize(file));
                     return FileVisitResult.CONTINUE;
                 }
+
                 Path relative = source.relativize(file);
-                Files.copy(file, target.resolve(relative), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+                Path targetFile = target.resolve(relative);
+                Files.createDirectories(targetFile.getParent());
+                Files.copy(file, targetFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
                 return FileVisitResult.CONTINUE;
             }
         });
+    }
+
+    private boolean shouldSkipWorldCloneFile(Path source, Path file) {
+        Path relative = source.relativize(file);
+        String normalized = relative.toString().replace('\\', '/');
+
+        return normalized.equalsIgnoreCase("uid.dat")
+                || normalized.equalsIgnoreCase("session.lock")
+                || normalized.equalsIgnoreCase("data/paper/metadata.dat");
+    }
+
+    private void deletePaperWorldMetadata(Path worldFolder) throws IOException {
+        Path paperMetadata = worldFolder.resolve("data").resolve("paper").resolve("metadata.dat");
+        Files.deleteIfExists(paperMetadata);
     }
 
     private void savePendingReconnectKills() {
         List<String> list = pendingReconnectKills.stream().map(UUID::toString).sorted().toList();
         getConfig().set("pending-reconnect-kills", list);
         saveConfig();
+    }
+
+    private void enforceAllSkyWarsWorlds() {
+        for (String mapName : mapNames()) {
+            World play = Bukkit.getWorld(playWorldName(mapName));
+            if (isManagedSkyWarsWorld(play)) {
+                applySkyWarsEnvironmentRules(play);
+            }
+        }
+    }
+
+    private boolean isManagedSkyWarsWorld(World world) {
+        if (world == null) {
+            return false;
+        }
+
+        String worldName = world.getName();
+
+        Location survival = loadLocation("survivalSpawn");
+        if (survival != null && survival.getWorld() != null) {
+            if (worldName.equals(survival.getWorld().getName())) {
+                return false;
+            }
+        }
+
+        if (!worldName.endsWith(PLAY_SUFFIX)) {
+            return false;
+        }
+
+        String baseName = worldName.substring(0, worldName.length() - PLAY_SUFFIX.length());
+        return mapExists(baseName);
+    }
+
+    /**
+     * 只管理 SkyWars 副本世界的环境。
+     * 不在定时器里覆盖 keepInventory，因为等待阶段和开局阶段的 keepInventory 状态不同。
+     */
+    private void applySkyWarsEnvironmentRules(World world) {
+        if (world == null) {
+            return;
+        }
+
+        world.setTime(6000L);
+        world.setStorm(false);
+        world.setThundering(false);
+        world.setWeatherDuration(20 * 60 * 60);
+        world.setClearWeatherDuration(20 * 60 * 60);
+
+        trySetAnyGameRule(world, false,
+                "advance_time",
+                "minecraft:advance_time",
+                "advanceTime",
+                "doDaylightCycle"
+        );
+
+        trySetAnyGameRule(world, false,
+                "spawn_mobs",
+                "minecraft:spawn_mobs",
+                "spawnMobs",
+                "doMobSpawning"
+        );
+
+        trySetAnyGameRule(world, false,
+                "spawn_monsters",
+                "minecraft:spawn_monsters",
+                "spawnMonsters"
+        );
     }
 
     /**
