@@ -889,7 +889,11 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
             playerArena.remove(uuid);
 
             if (player != null) {
-                restoreAndSendHome(player, forced ? "&c游戏已被管理员强制终止" : "&6获胜者：&f" + winnerName);
+                restoreAndSendHome(
+                        player,
+                        forced ? "&c游戏已被管理员强制终止" : "&6获胜者：&f" + winnerName,
+                        false
+                );
 
                 player.sendTitle(
                         color(forced ? "&c游戏终止" : "&6游戏结束"),
@@ -1504,21 +1508,21 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
 
     private void restoreAndSendHome(Player player, String message) {
         clearGameInventory(player);
-
+    
         if (getConfig().getBoolean("restore-player-inventory", true)) {
             SavedPlayerState state = savedStates.remove(player.getUniqueId());
-
+    
             if (state != null) {
                 state.restoreInventoryOnly(player);
             }
         } else {
             savedStates.remove(player.getUniqueId());
         }
-
+    
         teleportToSurvival(player);
         player.setGameMode(GameMode.SURVIVAL);
         preparePlayerVitals(player);
-
+    
         if (message != null && !message.isBlank()) {
             player.sendMessage(color(message));
         }
