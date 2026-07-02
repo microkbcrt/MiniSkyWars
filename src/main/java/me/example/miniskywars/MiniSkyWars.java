@@ -27,6 +27,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
@@ -380,7 +381,7 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
             player.sendMessage(color("&c地图名称只能包含字母、数字、中文、下划线和短横线。"));
             return;
         }
-        if (getConfig().isConfigurationSection("maps." + mapName) || worldFolder(mapName).toFile().exists()) {
+        if (getConfig().isConfigurationSection("maps." + mapName) || findExistingWorldFolder(mapName) != null) {
             player.sendMessage(color("&c这个地图已经存在。"));
             return;
         }
@@ -453,7 +454,7 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
                 sender.sendMessage(color("&c还没有设置死亡后复活/旁观点：/sw add deathspawn"));
                 return;
             }
-            if (!worldFolder(playWorldName(mapName)).toFile().exists()) {
+            if (findExistingWorldFolder(playWorldName(mapName)) == null) {
                 sender.sendMessage(color("&c还没有生成游戏副本，请先 /swmap save " + mapName));
                 return;
             }
@@ -558,7 +559,7 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
 
     private World ensurePlayWorldReady(String mapName) throws IOException {
         String play = playWorldName(mapName);
-        if (!worldFolder(play).toFile().exists()) {
+        if (findExistingWorldFolder(play) == null) {
             resetPlayWorld(mapName);
         }
         return loadMapWorld(play);
@@ -732,32 +733,43 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
 
     private void resetPlayWorld(String mapName) throws IOException {
         restoringMaps.add(mapName);
+    
         String play = playWorldName(mapName);
         World playWorld = Bukkit.getWorld(play);
+    
         if (playWorld != null) {
             for (Player player : new ArrayList<>(playWorld.getPlayers())) {
                 restoreAndSendHome(player, "&c地图正在恢复，你已被传送回生存主世界");
             }
+    
             Bukkit.unloadWorld(playWorld, false);
         }
-
-        Path source = worldFolder(mapName);
-        Path target = worldFolder(play);
-        if (!Files.exists(source)) {
-            throw new IOException("源地图文件夹不存在: " + source);
+    
+        Path source = findExistingWorldFolder(mapName);
+        if (source == null || !Files.exists(source)) {
+            restoringMaps.remove(mapName);
+            throw new IOException("源地图文件夹不存在: " + mapName + "，已尝试查找传统目录和 dimensions/minecraft 目录");
         }
+    
+        Path target = resolvePlayWorldTargetFolder(mapName, play);
+    
+        if (source.equals(target)) {
+            restoringMaps.remove(mapName);
+            throw new IOException("源地图和游戏副本目录相同，拒绝覆盖: " + source);
+        }
+    
         deleteDirectory(target);
         copyWorldFolder(source, target);
-
+    
         World newPlay = loadMapWorld(play);
         if (newPlay != null) {
             trySetAnyGameRule(newPlay, true, "keepInventory");
             fillChests(mapName, newPlay);
             newPlay.save();
         }
+    
         restoringMaps.remove(mapName);
     }
-
     private void fillChests(String mapName, World playWorld) {
         ConfigurationSection chests = getConfig().getConfigurationSection("maps." + mapName + ".chests");
         if (chests == null) {
@@ -1099,7 +1111,7 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
             return null;
         }
         World world = Bukkit.getWorld(worldName);
-        if (world == null && worldFolder(worldName).toFile().exists()) {
+        if (world == null && findExistingWorldFolder(worldName) != null) {
             // 生存主世界不一定是本插件的虚空地图，因此这里用普通 WorldCreator 加载。
             world = new WorldCreator(worldName).createWorld();
         }
@@ -1142,9 +1154,12 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
         if (existing != null) {
             return existing;
         }
-        if (!worldFolder(worldName).toFile().exists()) {
+    
+        Path folder = findExistingWorldFolder(worldName);
+        if (folder == null || !Files.exists(folder)) {
             return null;
         }
+    
         return new WorldCreator(worldName)
                 .generator(new VoidWorldGenerator())
                 .createWorld();
@@ -1198,7 +1213,96 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
     }
 
     private Path worldFolder(String worldName) {
+        Path existing = findExistingWorldFolder(worldName);
+        if (existing != null) {
+            return existing;
+        }
+        return defaultWorldFolder(worldName);
+    }
+    
+    private Path defaultWorldFolder(String worldName) {
         return Bukkit.getWorldContainer().toPath().resolve(worldName);
+    }
+    
+    /**
+     * 尽量找到真实世界目录。
+     *
+     * 关键点：
+     * 1. 如果世界已加载，优先用 Bukkit/Paper 自己返回的 world.getWorldFolder()。
+     * 2. 兼容传统目录：./map1
+     * 3. 兼容你现在 Paper 26.2 的目录：./world/dimensions/minecraft/map1
+     */
+    private Path findExistingWorldFolder(String worldName) {
+        if (worldName == null || worldName.isBlank()) {
+            return null;
+        }
+    
+        World loaded = Bukkit.getWorld(worldName);
+        if (loaded != null) {
+            File folder = loaded.getWorldFolder();
+            if (folder != null && folder.exists()) {
+                return folder.toPath();
+            }
+        }
+    
+        Path container = Bukkit.getWorldContainer().toPath();
+    
+        List<Path> candidates = List.of(
+                // 老式 Bukkit / Spigot 多世界目录
+                container.resolve(worldName),
+    
+                // 你当前遇到的 Paper 26.2 自定义维度目录
+                container.resolve("world")
+                        .resolve("dimensions")
+                        .resolve("minecraft")
+                        .resolve(worldName),
+    
+                // 兼容某些服务端把 dimensions 放在根目录的情况
+                container.resolve("dimensions")
+                        .resolve("minecraft")
+                        .resolve(worldName)
+        );
+    
+        for (Path path : candidates) {
+            if (Files.exists(path)) {
+                return path;
+            }
+        }
+    
+        return null;
+    }
+    
+    /**
+     * 计算 _play 副本应该复制到哪里。
+     *
+     * 如果源地图在：
+     * world/dimensions/minecraft/map1
+     *
+     * 那么 map1_play 应该放到：
+     * world/dimensions/minecraft/map1_play
+     *
+     * 而不是服务器根目录 ./map1_play。
+     */
+    private Path resolvePlayWorldTargetFolder(String mapName, String playWorldName) {
+        World loadedPlay = Bukkit.getWorld(playWorldName);
+        if (loadedPlay != null) {
+            File folder = loadedPlay.getWorldFolder();
+            if (folder != null) {
+                return folder.toPath();
+            }
+        }
+    
+        Path existingPlay = findExistingWorldFolder(playWorldName);
+        if (existingPlay != null) {
+            return existingPlay;
+        }
+    
+        Path source = findExistingWorldFolder(mapName);
+        if (source != null && source.getParent() != null) {
+            return source.getParent().resolve(playWorldName);
+        }
+    
+        return defaultWorldFolder(playWorldName);
     }
 
     private void deleteDirectory(Path path) throws IOException {
