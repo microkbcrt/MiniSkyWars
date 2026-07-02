@@ -1269,14 +1269,78 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
         if (world == null || rule == null || rule.isBlank()) {
             return false;
         }
+    
+        // 26.x 的 Spigot/Paper 正在迁移 GameRule API。
+        // 不直接调用 World#setGameRuleValue，也不直接引用 GameRule.SPAWN_MOBS 等字段，
+        // 否则可能出现“编译 API 有、运行时没有”或“运行时有、编译 API 没有”的问题。
+    
+        // 1) 运行时如果还保留字符串版 API，就优先用字符串版。
         try {
-            if (!world.isGameRule(rule)) {
+            java.lang.reflect.Method isGameRule = world.getClass().getMethod("isGameRule", String.class);
+            Object valid = isGameRule.invoke(world, rule);
+            if (valid instanceof Boolean && !((Boolean) valid)) {
                 return false;
             }
-            return world.setGameRuleValue(rule, value);
+        } catch (NoSuchMethodException ignored) {
+            // 新 API 可能已经没有字符串校验方法，继续尝试 GameRule 对象版。
+        } catch (Throwable ignored) {
+            // 校验失败不直接终止，继续尝试设置。
+        }
+    
+        try {
+            java.lang.reflect.Method legacySetter = world.getClass().getMethod("setGameRuleValue", String.class, String.class);
+            Object result = legacySetter.invoke(world, rule, value);
+            return Boolean.TRUE.equals(result);
+        } catch (NoSuchMethodException ignored) {
+            // 编译/运行环境没有旧方法，继续尝试对象版。
+        } catch (Throwable ignored) {
+            // 旧方法存在但设置失败，继续尝试对象版。
+        }
+    
+        // 2) 使用 GameRule.getByName(rule) + World#setGameRule(GameRule, Object)。
+        try {
+            Class<?> gameRuleClass = Class.forName("org.bukkit.GameRule");
+            Object gameRule = null;
+    
+            try {
+                java.lang.reflect.Method getByName = gameRuleClass.getMethod("getByName", String.class);
+                gameRule = getByName.invoke(null, rule);
+            } catch (Throwable ignored) {
+                // 若将来 getByName 被移除，直接返回 false；本插件不会因此崩服。
+            }
+    
+            if (gameRule == null) {
+                return false;
+            }
+    
+            Object typedValue = parseGameRuleValue(gameRuleClass, gameRule, value);
+            java.lang.reflect.Method setter = world.getClass().getMethod("setGameRule", gameRuleClass, Object.class);
+            Object result = setter.invoke(world, gameRule, typedValue);
+            return Boolean.TRUE.equals(result);
         } catch (Throwable ignored) {
             return false;
         }
+    }
+    
+    private Object parseGameRuleValue(Class<?> gameRuleClass, Object gameRule, String value) {
+        try {
+            java.lang.reflect.Method getType = gameRuleClass.getMethod("getType");
+            Object typeObj = getType.invoke(gameRule);
+            if (typeObj instanceof Class<?> type) {
+                if (type == Boolean.class || type == Boolean.TYPE) {
+                    return Boolean.parseBoolean(value);
+                }
+                if (type == Integer.class || type == Integer.TYPE) {
+                    return Integer.parseInt(value);
+                }
+            }
+        } catch (Throwable ignored) {
+            // 目前本插件只设置 boolean gamerule；取不到类型时按 boolean 兜底。
+        }
+        if ("true".equalsIgnoreCase(value) || "false".equalsIgnoreCase(value)) {
+            return Boolean.parseBoolean(value);
+        }
+        return value;
     }
 
     private Player requirePlayer(CommandSender sender) {
