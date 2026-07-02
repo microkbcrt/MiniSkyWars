@@ -1507,21 +1507,28 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
     }
 
     private void restoreAndSendHome(Player player, String message) {
+        restoreAndSendHome(player, message, true);
+    }
+    
+    private void restoreAndSendHome(Player player, String message, boolean restoreInventory) {
+        // 先清掉小游戏内的物品
         clearGameInventory(player);
     
-        if (getConfig().getBoolean("restore-player-inventory", true)) {
-            SavedPlayerState state = savedStates.remove(player.getUniqueId());
+        // 无论是否恢复背包，都把记录取出来，避免残留
+        SavedPlayerState state = savedStates.remove(player.getUniqueId());
     
-            if (state != null) {
-                state.restoreInventoryOnly(player);
-            }
-        } else {
-            savedStates.remove(player.getUniqueId());
-        }
-    
+        // 先传回生存主世界
         teleportToSurvival(player);
         player.setGameMode(GameMode.SURVIVAL);
         preparePlayerVitals(player);
+    
+        if (restoreInventory && getConfig().getBoolean("restore-player-inventory", true) && state != null) {
+            // /sw quit、等待阶段退出：恢复进场前背包
+            state.restoreInventoryOnly(player);
+        } else {
+            // 游戏结束、强制结束：不恢复旧背包，确保胜者/败者都清空
+            clearGameInventory(player);
+        }
     
         if (message != null && !message.isBlank()) {
             player.sendMessage(color(message));
