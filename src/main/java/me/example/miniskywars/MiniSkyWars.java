@@ -394,8 +394,8 @@ public final class MiniSkyWars extends JavaPlugin implements Listener, CommandEx
             return;
         }
         world.setSpawnLocation(0, 101, 0);
-        trySetGameRule(world, GameRule.DO_MOB_SPAWNING, false);
-        trySetGameRule(world, GameRule.DO_DAYLIGHT_CYCLE, false);
+        trySetGameRule(world, GameRule.SPAWN_MOBS, false);
+        trySetGameRule(world, GameRule.ADVANCE_TIME, false);
         trySetGameRule(world, GameRule.KEEP_INVENTORY, true);
         world.setTime(6000L);
 
